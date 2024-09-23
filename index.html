@@ -1,0 +1,180 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Stereo Fisheye Camera Viewer</title>
+    <style>
+        body, html { margin: 0; padding: 0; height: 100%; overflow: hidden; }
+        canvas { width: 100%; height: 100%; display: block; }
+    </style>
+</head>
+<body>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/roslibjs/0.20.0/roslib.min.js"></script>
+
+    <script>
+        // Three.jsの初期設定
+        const scene = new THREE.Scene();
+        const renderer = new THREE.WebGLRenderer();
+        renderer.setSize(window.innerWidth, window.innerHeight);
+        document.body.appendChild(renderer.domElement);
+
+        // カメラの設定
+        const cameraLeft = new THREE.PerspectiveCamera(60, window.innerWidth / window.innerHeight, 0.1, 1000);
+        const cameraRight = new THREE.PerspectiveCamera(60, window.innerWidth / window.innerHeight, 0.1, 1000);
+        cameraLeft.position.set(-30, 0, 0);
+        cameraRight.position.set(30, 0, 0);
+        scene.add(cameraLeft);
+        scene.add(cameraRight);
+
+        // ジャイロセンサーの初期化
+        let gyroData = {
+            alpha: 0,
+            beta: 0,
+            gamma: 5
+        };
+
+        // カメラの映像を取得してテクスチャとして読み込む関数
+        async function loadCameraTexture(id) {
+            const constraints = {
+                audio: false,
+                video: {
+                    deviceId: id,
+                    width: { ideal: 1920 },
+                    height: { ideal: 1080 }
+                }
+            };
+
+            const stream = await navigator.mediaDevices.getUserMedia(constraints);
+            const video = document.createElement('video');
+            video.srcObject = stream;
+            await video.play();
+
+            const texture = new THREE.VideoTexture(video);
+            texture.minFilter = THREE.LinearFilter;
+            texture.magFilter = THREE.LinearFilter;
+            texture.format = THREE.RGBFormat;
+
+            return texture;
+        }
+
+        // カメラの映像を投影する関数
+        async function createCameraProjection(id, position, radius) {
+            const geometry = new THREE.SphereGeometry(radius, 128, 128);
+            geometry.scale(-1, -1, -1); // 内側を見るために反転
+
+            var allDevices = await navigator.mediaDevices.enumerateDevices();
+
+              if (allDevices[id].kind == 'videoinput'){
+
+            const texture = await loadCameraTexture(allDevices[id].deviceId);
+            const material = new THREE.MeshBasicMaterial({ map: texture });
+
+            const mesh = new THREE.Mesh(geometry, material);
+            mesh.position.copy(position);
+            scene.add(mesh);
+            }
+        }
+
+        // カメラの映像を投影
+        createCameraProjection(2, new THREE.Vector3(-30, 0, 0), 30);
+        createCameraProjection(1, new THREE.Vector3(30, 0, 0), 30);
+
+        // キーボードイベントのリスナーを追加
+        document.addEventListener('keydown', handleKeyDown);
+
+        // キーボードイベントハンドラー
+        function handleKeyDown(event) {
+            const speed = 0.1;
+            const rotation = gyroData;
+            if(Math.abs(gyroData.beta)  < 0.6){
+                switch (event.key) {
+                    case 'ArrowUp':
+                        gyroData.beta -= speed;
+                        break;
+                    case 'ArrowDown':
+                        gyroData.beta += speed;
+                        break;
+                    case 'ArrowLeft':
+                        gyroData.gamma -= speed;
+                        break;
+                    case 'ArrowRight':
+                        gyroData.gamma += speed;
+                        break;
+                }
+            }else{
+                gyroData = rotation;
+            }
+                console.log(gyroData.beta);
+        }
+
+        //const pitch = 0;
+        let yaw1 = 0;
+        let yaw2 = 0;
+
+        // ROS BridgeのWebSocket接続
+        var ros = new ROSLIB.Ros({
+            url: 'ws://localhost:9090'  // ROS Bridgeが起動している場所に合わせて変更
+        });
+
+        // 2つのIMUトピックのsubscribe
+        var imu1Listener = new ROSLIB.Topic({
+            ros: ros,
+            name: '/imu1/data',
+            messageType: 'sensor_msgs/MagneticField'
+        });
+
+        var imu2Listener = new ROSLIB.Topic({
+            ros: ros,
+            name: '/imu2/data',
+            messageType: 'sensor_msgs/MagneticField'
+        });
+        //pitch -0.69 to 0.6
+        //yaw 2.6 to 6.6
+
+        imu1Listener.subscribe(function (message) {
+            gyroData.beta = -message.magnetic_field.y * ( Math.PI / 180 ) ;
+            yaw1 = -message.magnetic_field.z * ( Math.PI / 180 );
+            //console.log(yaw1);
+        });
+        imu2Listener.subscribe(function (message) {
+             gyroData.gamma = yaw1 + (message.magnetic_field.z * ( Math.PI / 180 )) - 0.5;
+        });
+
+        // 描画ループ
+        function render() {
+            // 頭部の回転に応じてカメラの投影を回転
+            if(Math.abs(gyroData.beta) < 0.7 && Math.abs(gyroData.gamma) < 0.9){
+                console.log(gyroData.gamma);
+                scene.children.forEach(child => {
+                    if (child instanceof THREE.Mesh) {
+                        child.rotation.x = gyroData.beta;
+                        child.rotation.y = gyroData.gamma;
+                        child.rotation.z = gyroData.alpha;
+                    }
+                });
+            }
+
+            // カメラの回転
+            cameraLeft.rotation.copy(cameraRight.rotation);
+
+            // 左カメラの描画
+            renderer.setViewport(0, 0, window.innerWidth / 2, window.innerHeight);
+            renderer.setScissor( 0, 0, window.innerWidth/2,  window.innerHeight);
+            renderer.setScissorTest ( true );
+            renderer.render(scene, cameraLeft);
+
+            // 右カメラの描画
+            renderer.setViewport(window.innerWidth / 2, 0, window.innerWidth / 2, window.innerHeight);
+            
+            renderer.setScissor( window.innerWidth/2, 0, window.innerWidth/2,  window.innerHeight);
+            renderer.render(scene, cameraRight);
+
+            requestAnimationFrame(render);
+        }
+
+        render(); // 描画を開始
+    </script>
+</body>
+</html>
